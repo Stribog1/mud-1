@@ -7,39 +7,51 @@
 *  $Revision$                                                     *
 ************************************************************************ */
 
+#include "skills.h"
+
 #include "object.prototypes.hpp"
+#include "obj.hpp"
 #include "comm.h"
 #include "handler.h"
+#include "db.h"
+#include "interpreter.h"
+#include "spells.h"
 #include "screen.h"
+#include "dg_script/dg_scripts.h"
+#include "constants.h"
+#include "im.h"
+#include "features.hpp"
 #include "random.hpp"
+#include "chars/character.h"
+#include "room.hpp"
+#include "logger.hpp"
+#include "utils.h"
+#include "structs.h"
+#include "sysdep.h"
+#include "conf.h"
+#include "classes/constants.hpp"
 #include "skills_info.h"
 
+#include <sstream>
 #include <algorithm>
 
 extern const byte kSkillCapOnZeroRemort = 80;
 extern const byte kSkillCapBonusPerRemort = 5;
 
-;
-const int kNoviceSkillThreshold = 75;
-const short kSkillDiceSize = 100;
-const short kSkillCriticalFailure = 6;
-const short kSkillCriticalSuccess = 95;
-const short kSkillDegreeDivider = 5;
-const short kMinSkillDegree = 0;
-const short kMaxSkillDegree = 10;
-const double kSkillWeight = 1.0;
-const double kNoviceSkillWeight = 0.75;
-const double kParameterWeight = 3.0;
-const double kBonusWeight = 1.0;
-const double kSaveWeight = 1.0;
+const int kSkillDiceSize = 20;
+const int kSkillDiceFail = 20;
+const double kVictimModificatorDivider = 2.0;
+const double kSkillDivider = 5.0;
+const double kBonusDivider = 10.0;
+const double kSaveDivider = 5.0;
+const double kParameterDivider = 2.0;
 
 const short kDummyKnight = 390;
 const short kDummyShield = 391;
 const short kDummyWeapon = 392;
 
-bool MakeLuckTest(CHAR_DATA *ch, CHAR_DATA *vict);
-void SendSkillRollMsg(CHAR_DATA *ch, CHAR_DATA *victim, ESkill skill_id,
-					  int actor_rate, int victim_rate, int threshold, int roll, SkillRollResult &result);
+void SendDicepoolRollMsg(CHAR_DATA *ch, CHAR_DATA *victim, ESkill skill_id, int dicepool,
+						 int save, int modificator, DicepoolRollResultType &result);
 
 extern struct message_list fight_messages[MAX_MESSAGES];
 
@@ -644,177 +656,170 @@ int SendSkillMessages(int dam, CHAR_DATA *ch, CHAR_DATA *vict, int attacktype, s
 	return (0);
 }
 
-int CalculateVictimRate(CHAR_DATA *ch, const ESkill skill_id, CHAR_DATA *vict) {
+int CalcVictimModificator(CHAR_DATA *ch, const ESkill skill_id, CHAR_DATA *vict) {
 	if (!vict) {
 		return 0;
 	}
 
-	int rate = 0;
+	int victim_modi = 0;
 
 	switch (skill_id) {
 
 		case SKILL_BACKSTAB: {
 			if ((GET_POS(vict) >= POS_FIGHTING) && AFF_FLAGGED(vict, EAffectFlag::AFF_AWARNESS)) {
-				rate += 30;
+				victim_modi -= 30;
 			}
-			rate += GET_REAL_DEX(vict);
-			//rate -= size_app[GET_POS_SIZE(vict)].ac;
+			victim_modi += size_app[GET_POS_SIZE(vict)].ac;
+			victim_modi -= dex_bonus(GET_REAL_DEX(vict));
 			break;
 		}
 
 		case SKILL_BASH: {
 			if (GET_POS(vict) < POS_FIGHTING && GET_POS(vict) > POS_SLEEPING) {
-				rate -= 20;
+				victim_modi -= 20;
 			}
 			if (PRF_FLAGGED(vict, PRF_AWAKE)) {
-				rate -= CalculateSkillAwakeModifier(ch, vict);
+				victim_modi -= CalcAwakeMod(ch, vict);
 			}
 			break;
 		}
 
 		case SKILL_HIDE: {
 			if (AWAKE(vict)) {
-				rate -= int_app[GET_REAL_INT(vict)].observation;
+				victim_modi -= int_app[GET_REAL_INT(vict)].observation;
 			}
 			break;
 		}
 
 		case SKILL_KICK: {
-			//rate += size_app[GET_POS_SIZE(vict)].interpolate;
-			rate += GET_REAL_CON(vict);
+			victim_modi += size_app[GET_POS_SIZE(vict)].interpolate;
+			victim_modi -= GET_REAL_CON(vict);
 			if (PRF_FLAGGED(vict, PRF_AWAKE)) {
-				rate += CalculateSkillAwakeModifier(ch, vict);
+				victim_modi -= CalcAwakeMod(ch, vict);
 			}
 			break;
 		}
 
 		case SKILL_SNEAK: {
 			if (AWAKE(vict)) {
-				rate -= int_app[GET_REAL_INT(vict)].observation;
+				victim_modi -= int_app[GET_REAL_INT(vict)].observation;
 			}
 			break;
 		}
 
 		case SKILL_STEAL: {
 			if (AWAKE(vict)) {
-				rate -= int_app[GET_REAL_INT(vict)].observation;
+				victim_modi -= int_app[GET_REAL_INT(vict)].observation;
 			}
 			break;
 		}
 
 		case SKILL_TRACK: {
-			rate += GET_REAL_CON(vict) / 2;
+			victim_modi += GET_REAL_CON(vict) / 2;
 			break;
 		}
 
 		case SKILL_MULTYPARRY:
 		case SKILL_PARRY: {
-			rate = 100;
+			victim_modi = 100;
 			break;
 		}
 
 		case SKILL_TOUCH: {
-			rate -= dex_bonus(GET_REAL_DEX(vict));
-			rate -= size_app[GET_POS_SIZE(vict)].interpolate;
+			victim_modi -= dex_bonus(GET_REAL_DEX(vict));
+			victim_modi -= size_app[GET_POS_SIZE(vict)].interpolate;
 			break;
 		}
 
 		case SKILL_PROTECT: {
-			rate = 50;
+			victim_modi = 50;
 			break;
 		}
 
 		case SKILL_DISARM: {
-			rate -= dex_bonus(GET_REAL_STR(ch));
+			victim_modi -= dex_bonus(GET_REAL_STR(ch));
 			if (GET_EQ(vict, WEAR_BOTHS))
-				rate -= 10;
+				victim_modi -= 10;
 			if (PRF_FLAGGED(vict, PRF_AWAKE))
-				rate -= CalculateSkillAwakeModifier(ch, vict);
+				victim_modi -= CalcAwakeMod(ch, vict);
 			break;
 		}
 
 		case SKILL_CAMOUFLAGE: {
 			if (AWAKE(vict))
-				rate -= int_app[GET_REAL_INT(vict)].observation;
+				victim_modi -= int_app[GET_REAL_INT(vict)].observation;
 			break;
 		}
 
 		case SKILL_DEVIATE: {
-			rate -= dex_bonus(GET_REAL_DEX(vict));
+			victim_modi -= dex_bonus(GET_REAL_DEX(vict));
 			break;
 		}
 
 		case SKILL_CHOPOFF: {
 			if (AWAKE(vict) || AFF_FLAGGED(vict, EAffectFlag::AFF_AWARNESS) || MOB_FLAGGED(vict, MOB_AWAKE))
-				rate -= 20;
+				victim_modi -= 20;
 			if (PRF_FLAGGED(vict, PRF_AWAKE))
-				rate -= CalculateSkillAwakeModifier(ch, vict);
+				victim_modi -= CalcAwakeMod(ch, vict);
 			break;
 		}
 
 		case SKILL_MIGHTHIT: {
 			if (IS_NPC(vict))
-				rate -= size_app[GET_POS_SIZE(vict)].shocking / 2;
+				victim_modi -= (size_app[GET_POS_SIZE(vict)].shocking) / 2;
 			else
-				rate -= size_app[GET_POS_SIZE(vict)].shocking;
+				victim_modi -= size_app[GET_POS_SIZE(vict)].shocking;
 			break;
 		}
 
 		case SKILL_STUPOR: {
-			rate -= GET_REAL_CON(vict);
+			victim_modi -= GET_REAL_CON(vict);
 			break;
 		}
 
 		case SKILL_PUNCTUAL: {
-			rate -= int_app[GET_REAL_INT(vict)].observation;
+			victim_modi -= int_app[GET_REAL_INT(vict)].observation;
 			break;
 		}
 
 		case SKILL_AWAKE: {
-			rate -= int_app[GET_REAL_INT(vict)].observation;
+			victim_modi -= int_app[GET_REAL_INT(vict)].observation;
 		}
 			break;
 
 		case SKILL_LOOK_HIDE: {
 			if (CAN_SEE(vict, ch) && AWAKE(vict)) {
-				rate -= int_app[GET_REAL_INT(ch)].observation;
+				victim_modi -= int_app[GET_REAL_INT(ch)].observation;
 			}
 			break;
 		}
 
 		case SKILL_STRANGLE: {
 			if (CAN_SEE(ch, vict) && PRF_FLAGGED(vict, PRF_AWAKE)) {
-				rate -= CalculateSkillAwakeModifier(ch, vict);
+				victim_modi -= CalcAwakeMod(ch, vict);
 			}
 			break;
 		}
 
 		case SKILL_STUN: {
 			if (PRF_FLAGGED(vict, PRF_AWAKE))
-				rate -= CalculateSkillAwakeModifier(ch, vict);
+				victim_modi -= CalcAwakeMod(ch, vict);
 			break;
 		}
 		default: {
-			rate = 0;
+			victim_modi -= 1;
 			break;
 		}
 	}
 
-	if (skill_info[skill_id].save_type != SAVING_NONE) {
-		rate -= static_cast<int>(round(GET_SAVE(vict, skill_info[skill_id].save_type) * kSaveWeight));
-	}
-
-	return rate;
+	return std::abs(victim_modi);
 }
 
-// \TODO По-хорошему, нужна отдельно функция, которая считает голый скилл с бонусами от перков
-// И отдельно - бонус от статов и всего прочего. Однако не вижу сейчас смысла этим заниматься,
-// потому что по-хорошему половина этих параметров должна находиться в описании соответствующей абилки
-// которого не имеется и которое сейчас вводить не время.
-int CalculateSkillRate(CHAR_DATA *ch, const ESkill skill_id, CHAR_DATA *vict) {
+int CalcRawSkill(CHAR_DATA *ch, const ESkill skill_id, CHAR_DATA *vict) {
 	int base_percent = ch->get_skill(skill_id);
-	int parameter_bonus = 0; // бонус от ключевого параметра
+	int total_percent = 0;
 	int bonus = 0; // бонус от дополнительных параметров.
+	int parameter_bonus = 0; // бонус от ключевого параметра
 	int size = 0; // бонусы/штрафы размера (не спрашивайте...)
 
 	if (base_percent <= 0) {
@@ -823,9 +828,11 @@ int CalculateSkillRate(CHAR_DATA *ch, const ESkill skill_id, CHAR_DATA *vict) {
 
 	if (!IS_NPC(ch) && !ch->affected.empty()) {
 		for (const auto &aff : ch->affected) {
+			// скушал свиток с эксп умелкой
 			if (aff->location == APPLY_BONUS_SKILLS) {
 				base_percent += aff->modifier;
 			}
+
 			if (aff->location == APPLY_PLAQUE) {
 				base_percent -= number(ch->get_skill(skill_id) * 0.4,
 									   ch->get_skill(skill_id) * 0.05);
@@ -842,19 +849,20 @@ int CalculateSkillRate(CHAR_DATA *ch, const ESkill skill_id, CHAR_DATA *vict) {
 	switch (skill_id) {
 
 		case SKILL_HIDETRACK: {
-			parameter_bonus += GET_REAL_INT(ch);
-			bonus += can_use_feat(ch, STEALTHY_FEAT) ? 5 : 0;
+			bonus += (can_use_feat(ch, STEALTHY_FEAT) ? 5 : 0);
 			break;
 		}
 
 		case SKILL_BACKSTAB: {
-			parameter_bonus += GET_REAL_DEX(ch);
-			if (awake_others(ch) || equip_in_metall(ch)) {
-				bonus += -30;
+			parameter_bonus = dex_bonus(GET_REAL_DEX(ch));
+			if (awake_others(ch)
+				|| equip_in_metall(ch)) {
+				bonus -= 50;
 			}
+
 			if (vict) {
 				if (!CAN_SEE(vict, ch)) {
-					bonus += 20;
+					bonus += 25;
 				}
 				if (GET_POS(vict) < POS_FIGHTING) {
 					bonus += (20 * (POS_FIGHTING - GET_POS(vict)));
@@ -867,9 +875,6 @@ int CalculateSkillRate(CHAR_DATA *ch, const ESkill skill_id, CHAR_DATA *vict) {
 			parameter_bonus += dex_bonus(GET_REAL_DEX(ch));
 			bonus = size + (GET_EQ(ch, WEAR_SHIELD) ?
 							weapon_app[MIN(35, MAX(0, GET_OBJ_WEIGHT(GET_EQ(ch, WEAR_SHIELD))))].bashing : 0);
-			if (PRF_FLAGGED(ch, PRF_AWAKE)) {
-				bonus = -50;
-			}
 			break;
 		}
 
@@ -896,14 +901,7 @@ int CalculateSkillRate(CHAR_DATA *ch, const ESkill skill_id, CHAR_DATA *vict) {
 		}
 
 		case SKILL_KICK: {
-			if (!ch->ahorse() && vict->ahorse()) {
-				base_percent = 0;
-			} else {
-				parameter_bonus += GET_REAL_STR(ch);
-				if (AFF_FLAGGED(vict, EAffectFlag::AFF_HOLD)) {
-					bonus += 50;
-				}
-			}
+			parameter_bonus = dex_bonus(GET_REAL_DEX(ch)) + dex_bonus(GET_REAL_STR(ch));
 			break;
 		}
 
@@ -970,8 +968,9 @@ int CalculateSkillRate(CHAR_DATA *ch, const ESkill skill_id, CHAR_DATA *vict) {
 				|| SECT(ch->in_room) == SECT_UNDERWATER
 				|| SECT(ch->in_room) == SECT_SECRET
 				|| ROOM_FLAGGED(ch->in_room, ROOM_NOTRACK)) {
+				total_percent = 0;
 				parameter_bonus = 0;
-				bonus = -100;
+				bonus = 0;
 			}
 
 			break;
@@ -1127,6 +1126,7 @@ int CalculateSkillRate(CHAR_DATA *ch, const ESkill skill_id, CHAR_DATA *vict) {
 		case SKILL_AWAKE: {
 			parameter_bonus = dex_bonus(GET_REAL_DEX(ch));
 			bonus += int_app[GET_REAL_INT(ch)].observation;
+			// Это что за адское шапито?!!!
 			/* if (real_dex < INT_APP_SIZE) {
 				bonus = int_app[real_dex].observation;
 			} else {
@@ -1198,19 +1198,14 @@ int CalculateSkillRate(CHAR_DATA *ch, const ESkill skill_id, CHAR_DATA *vict) {
 		default: break;
 	}
 
-	if (AFF_FLAGGED(ch, EAffectFlag::AFF_NOOB_REGEN)) {
-		bonus += 5;
+	total_percent = base_percent
+		+ static_cast<int>(round(bonus / kBonusDivider))
+		+ static_cast<int>(round(parameter_bonus / kParameterDivider));
+	if (PRF_FLAGGED(ch, PRF_AWAKE) && (skill_id == SKILL_BASH)) {
+		total_percent /= 2;
 	}
 
-	double rate = 0;
-	if (MakeLuckTest(ch, vict)) {
-		rate = round(std::max(0, base_percent - kNoviceSkillThreshold) * kSkillWeight
-			+ std::min(kNoviceSkillThreshold, base_percent) * kNoviceSkillWeight
-			+ bonus * kBonusWeight
-			+ parameter_bonus * kParameterWeight);
-	}
-
-	return static_cast<int>(rate);
+	return std::min(total_percent, skill_info[skill_id].cap);
 }
 
 bool MakeLuckTest(CHAR_DATA *ch, CHAR_DATA *vict) {
@@ -1239,38 +1234,70 @@ bool MakeLuckTest(CHAR_DATA *ch, CHAR_DATA *vict) {
 	return true;
 }
 
-SkillRollResult MakeSkillTest(CHAR_DATA *ch, ESkill skill_id, CHAR_DATA *vict) {
-	int actor_rate = CalculateSkillRate(ch, skill_id, vict);
-	int victim_rate = CalculateVictimRate(ch, skill_id, vict);
-
-	int success_threshold = std::max(0, actor_rate - victim_rate - skill_info[skill_id].difficulty);
-	int dice_roll = number(1, kSkillDiceSize);
-
-	// \TODO Механика критфейла и критуспеха пока не реализована.
-	SkillRollResult result;
-	result.success = dice_roll <= success_threshold;
-	result.critical = (dice_roll > kSkillCriticalSuccess) || (dice_roll < kSkillCriticalFailure);
-	result.degree = std::abs(dice_roll - success_threshold) / kSkillDegreeDivider;
-	result.degree = std::clamp(result.degree, kMinSkillDegree, kMaxSkillDegree);
-
-	SendSkillRollMsg(ch, vict, skill_id, actor_rate, victim_rate, success_threshold, dice_roll, result);
+DicepoolRollResultType DoDicepoolRoll(const int dicepool, const int difficulty) {
+	static DicepoolRollResultType result;
+	for (int i = 0; i < dicepool; i++) {
+		int roll = number(1, kSkillDiceSize);
+		if (roll == kSkillDiceSize) {
+			++result.top_rolls;
+			continue;
+		}
+		if (roll >= difficulty) {
+			++result.successes;
+			continue;
+		}
+		if (roll == kSkillDiceFail) {
+			++result.failures;
+		}
+	}
 	return result;
 }
 
-void SendSkillRollMsg(CHAR_DATA *ch, CHAR_DATA *victim, ESkill skill_id,
-					  int actor_rate, int victim_rate, int threshold, int roll, SkillRollResult &result) {
+DicepoolRollResultType MakeSkillTest(CHAR_DATA *ch, ESkill skill_id, CHAR_DATA *vict) {
+	int dicepool = 0;
+	bool luck_test_success = MakeLuckTest(ch, vict);
+	if (luck_test_success) {
+		dicepool = CalcRawSkill(ch, skill_id, vict);
+	}
+	dicepool = static_cast<int>(round(dicepool / kSkillDivider));
+
+	int victim_modificator = CalcVictimModificator(ch, skill_id, vict);
+	victim_modificator = static_cast<int>(round(victim_modificator / kVictimModificatorDivider));
+
+	int victim_save = 0;
+	if (skill_info[skill_id].save_type != SAVING_NONE) {
+		victim_save = GET_SAVE(vict, skill_info[skill_id].save_type);
+	}
+	victim_save = static_cast<int>(round(victim_save / kSaveDivider));
+
+	int threshold = victim_save + victim_modificator;
+
+	DicepoolRollResultType result = DoDicepoolRoll(dicepool, skill_info[skill_id].difficulty);
+	// \TODO Механика критфейла и критуспеха пока не реализована.
+	if (result.successes >= threshold) {
+		result.successes -= threshold;
+	} else {
+		threshold -= result.successes;
+		result.successes = 0;
+		result.top_rolls = std::max(0, result.top_rolls - threshold);
+	}
+
+	SendDicepoolRollMsg(ch, vict, skill_id, dicepool, victim_save, victim_modificator, result);
+	return result;
+}
+
+// \TODO Не забыть убрать после ребаланса умений
+void SendDicepoolRollMsg(CHAR_DATA *ch, CHAR_DATA *victim, ESkill skill_id, int dicepool,
+						 int save, int modificator, DicepoolRollResultType &result) {
 	std::stringstream buffer;
 	buffer << "&C"
-		   << "Skill: '" << skill_info[skill_id].name << "'"
-		   << " Rate: " << actor_rate
+		   << "Skill: " << skill_info[skill_id].name
 		   << " Victim: " << victim->get_name()
-		   << " V.Rate: " << victim_rate
-		   << " Difficulty: " << skill_info[skill_id].difficulty
-		   << " Threshold: " << threshold
-		   << " Roll: " << roll
-		   << " Success: " << (result.success ? "&Gyes&C" : "&Rno&C")
-		   << " Crit: " << (result.critical ? "yes" : "no")
-		   << " Degree: " << result.degree
+		   << " Dicepool: " << dicepool
+		   << " V.save: " << save
+		   << " V.mod: " << modificator
+		   << " Successes: " << result.GetSucessesAmount()
+		   << " Result: " << (result.GetSucessesAmount() >= save + modificator ? "success" : "&Rfail")
 		   << "&n" << std::endl;
 	ch->send_to_TC(false, true, true, buffer.str().c_str());
 }
@@ -1283,7 +1310,7 @@ void SendSkillBalanceMsg(CHAR_DATA *ch, const char *skill_name, int percent, int
 	ch->send_to_TC(false, true, true, buffer.str().c_str());
 }
 
-int CalculateCurrentSkill(CHAR_DATA *ch, const ESkill skill, CHAR_DATA *vict) {
+int CalcCurrentSkill(CHAR_DATA *ch, const ESkill skill, CHAR_DATA *vict) {
 	if (skill < SKILL_FIRST || skill > MAX_SKILL_NUM) {
 		return 0;
 	}
@@ -1365,7 +1392,7 @@ int CalculateCurrentSkill(CHAR_DATA *ch, const ESkill skill, CHAR_DATA *vict) {
 					victim_modi -= 20;
 				}
 				if (PRF_FLAGGED(vict, PRF_AWAKE)) {
-					victim_modi -= CalculateSkillAwakeModifier(ch, vict);
+					victim_modi -= CalcAwakeMod(ch, vict);
 				}
 			}
 			break;
@@ -1408,7 +1435,7 @@ int CalculateCurrentSkill(CHAR_DATA *ch, const ESkill skill, CHAR_DATA *vict) {
 				victim_modi += size_app[GET_POS_SIZE(vict)].interpolate;
 				victim_modi -= GET_REAL_CON(vict);
 				if (PRF_FLAGGED(vict, PRF_AWAKE)) {
-					victim_modi -= CalculateSkillAwakeModifier(ch, vict);
+					victim_modi -= CalcAwakeMod(ch, vict);
 				}
 			}
 			break;
@@ -1580,7 +1607,7 @@ int CalculateCurrentSkill(CHAR_DATA *ch, const ESkill skill, CHAR_DATA *vict) {
 				if (GET_EQ(vict, WEAR_BOTHS))
 					victim_modi -= 10;
 				if (PRF_FLAGGED(vict, PRF_AWAKE))
-					victim_modi -= CalculateSkillAwakeModifier(ch, vict);
+					victim_modi -= CalcAwakeMod(ch, vict);
 			}
 			break;
 		}
@@ -1652,7 +1679,7 @@ int CalculateCurrentSkill(CHAR_DATA *ch, const ESkill skill, CHAR_DATA *vict) {
 				if (AWAKE(vict) || AFF_FLAGGED(vict, EAffectFlag::AFF_AWARNESS) || MOB_FLAGGED(vict, MOB_AWAKE))
 					victim_modi -= 20;
 				if (PRF_FLAGGED(vict, PRF_AWAKE))
-					victim_modi -= CalculateSkillAwakeModifier(ch, vict);
+					victim_modi -= CalcAwakeMod(ch, vict);
 			}
 			break;
 		}
@@ -1787,7 +1814,7 @@ int CalculateCurrentSkill(CHAR_DATA *ch, const ESkill skill, CHAR_DATA *vict) {
 				if (!CAN_SEE(ch, vict))
 					bonus += (base_percent + bonus) / 5;
 				if (PRF_FLAGGED(vict, PRF_AWAKE))
-					victim_modi -= CalculateSkillAwakeModifier(ch, vict);
+					victim_modi -= CalcAwakeMod(ch, vict);
 			}
 			break;
 		}
@@ -1808,7 +1835,7 @@ int CalculateCurrentSkill(CHAR_DATA *ch, const ESkill skill, CHAR_DATA *vict) {
 					weapon_app[GET_OBJ_WEIGHT(GET_EQ(ch, WEAR_BOTHS))].shocking;
 
 			if (PRF_FLAGGED(vict, PRF_AWAKE))
-				victim_modi -= CalculateSkillAwakeModifier(ch, vict);
+				victim_modi -= CalcAwakeMod(ch, vict);
 			break;
 		}
 		default: break;
@@ -1940,10 +1967,10 @@ void TrainSkill(CHAR_DATA *ch, const ESkill skill, bool success, CHAR_DATA *vict
 * Расчет влияния осторожки у victim против умений killer.
 * В данный момент учитывается случай 'игрок против игрока', где осторожка считается как скилл/2
 */
-int CalculateSkillAwakeModifier(CHAR_DATA *killer, CHAR_DATA *victim) {
+int CalcAwakeMod(CHAR_DATA *killer, CHAR_DATA *victim) {
 	int result = 0;
 	if (!killer || !victim) {
-		log("SYSERROR: zero character in CalculateSkillAwakeModifier.");
+		log("SYSERROR: zero character in CalcAwakeMod.");
 	} else if (IS_NPC(killer) || IS_NPC(victim)) {
 		result = victim->get_skill(SKILL_AWAKE);
 	} else {

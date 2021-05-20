@@ -7,6 +7,8 @@
 #include "abilities_rollsystem.h"
 #include "random.hpp"
 
+#include <algorithm>
+
 namespace abilities {
 
 void AgainstRivalRollType::initialize(CHAR_DATA *abilityActor, int usedAbility, CHAR_DATA *abilityVictim) {
@@ -142,7 +144,7 @@ short AgainstRivalRollType::calculateTargetRating() {
 
 //TODO: избавиться от target в calculate_skill и убрать обертку
 short AgainstRivalRollType::calculatBaseSkillRating() {
-  return (CalculateCurrentSkill(_actor, _baseSkill, _rival) / kSkillRatingDivider);
+  return (CalcCurrentSkill(_actor, _baseSkill, _rival) / kSkillRatingDivider);
 };
 
 //TODO: Избавиться от таргета в ситуационном бонусе, он там не нужен
